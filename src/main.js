@@ -1,18 +1,17 @@
-// Zoopla Property Scraper - JSON-first with resilient fallbacks
+// Zoopla Property Scraper - Production-grade Firefox stealth scraper
 import { Actor, log } from 'apify';
 import { Dataset } from 'crawlee';
 import { load as cheerioLoad } from 'cheerio';
-import { HeaderGenerator } from 'header-generator';
-import { chromium } from 'playwright';
+import { firefox } from 'playwright';
 import { randomUUID } from 'node:crypto';
 import { URL } from 'node:url';
 
-const headerGenerator = new HeaderGenerator({
-    browsers: [{ name: 'chrome', minVersion: 120 }],
-    devices: ['desktop'],
-    operatingSystems: ['windows', 'macos'],
-    locales: ['en-GB', 'en-US'],
-});
+// Authentic Firefox user agents for Windows
+const FIREFOX_USER_AGENTS = [
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) Gecko/20100101 Firefox/122.0',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0',
+];
 
 const HTML_HEADERS = {
     accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
@@ -27,7 +26,6 @@ const JSON_HEADERS = {
     'accept-language': 'en-GB,en;q=0.9',
 };
 
-const MAX_SEARCH_RETRIES = 4;
 const DETAIL_RETRIES = 2;
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -56,20 +54,28 @@ const cleanItem = (item) =>
 
 const createSession = () => {
     const seed = randomUUID();
+    // Select random Firefox user agent for variety
+    const userAgent = FIREFOX_USER_AGENTS[Math.floor(Math.random() * FIREFOX_USER_AGENTS.length)];
+
     return {
         id: seed,
-        headers: headerGenerator.getHeaders({
-            sessionToken: seed,
-            locales: ['en-GB', 'en-US'],
-            devices: ['desktop'],
-            operatingSystems: ['windows'],
-        }),
+        userAgent,
+        headers: {
+            'User-Agent': userAgent,
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-GB,en-US;q=0.9,en;q=0.8',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'DNT': '1',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+        },
     };
 };
 
 const rotateSession = (session) => {
     const fresh = createSession();
     session.id = fresh.id;
+    session.userAgent = fresh.userAgent;
     session.headers = fresh.headers;
 };
 
@@ -88,6 +94,38 @@ const toPlaywrightProxy = async (proxyConfiguration) => {
     } catch (err) {
         log.warning(`Failed to parse proxy URL for Playwright: ${err.message}`);
         return null;
+    }
+};
+
+const warmupSession = async (session, proxyConfiguration) => {
+    log.info('Running Playwright bootstrap to obtain fresh cookies...');
+    try {
+        const pg = await ensurePage(session, proxyConfiguration);
+
+        // Visit homepage first to establish session
+        await pg.goto('https://www.zoopla.co.uk/', {
+            waitUntil: 'networkidle',
+            timeout: 45000
+        });
+
+        // Check for Cloudflare challenge
+        const content = await pg.content();
+        if (content.includes('cf-browser-verification') || content.includes('Just a moment')) {
+            log.info('Cloudflare challenge on homepage, waiting...');
+            await pg.waitForLoadState('networkidle', { timeout: 15000 });
+            await delay(2000);
+        }
+
+        // Add some human-like interactions
+        await pg.mouse.move(300 + Math.random() * 200, 200 + Math.random() * 100);
+        await delay(500 + Math.random() * 500);
+
+        log.info('Session warmup successful!');
+        return true;
+    } catch (error) {
+        log.warning(`Playwright bootstrap failed: ${error.message}`);
+        await closeContext();
+        return false;
     }
 };
 
@@ -139,10 +177,10 @@ let page;
 const closeContext = async () => {
     try {
         if (context) await context.close();
-    } catch {}
+    } catch { }
     try {
         if (browser) await browser.close();
-    } catch {}
+    } catch { }
     browser = undefined;
     context = undefined;
     page = undefined;
@@ -152,28 +190,125 @@ const ensurePage = async (session, proxyConfiguration) => {
     if (page && !page.isClosed()) return page;
     await closeContext();
     const proxy = await toPlaywrightProxy(proxyConfiguration);
-    browser = await chromium.launch({
+
+    // Comprehensive Firefox stealth options
+    browser = await firefox.launch({
         headless: true,
-        args: ['--disable-blink-features=AutomationControlled', '--no-sandbox'],
         proxy: proxy || undefined,
+        firefoxUserPrefs: {
+            // Disable WebDriver flag
+            'useAutomationExtension': false,
+            'dom.webdriver.enabled': false,
+
+            // Privacy & fingerprinting protection
+            'privacy.resistFingerprinting': true,
+            'privacy.trackingprotection.enabled': true,
+
+            // Disable automation indicators
+            'devtools.console.stdout.content': false,
+            'browser.tabs.remote.autostart': true,
+            'browser.tabs.remote.autostart.2': true,
+
+            // Realistic media settings
+            'media.navigator.enabled': true,
+            'media.peerconnection.enabled': true,
+
+            // Language and locale
+            'intl.accept_languages': 'en-GB,en-US;q=0.9,en;q=0.8',
+            'javascript.enabled': true,
+
+            // Canvas and WebGL fingerprinting
+            'webgl.disabled': false,
+            'privacy.resistFingerprinting.block_mozAddonManager': true,
+
+            // Disable automation detection
+            'marionette.enabled': false,
+        },
+        args: [
+            '--disable-blink-features=AutomationControlled',
+            '--no-sandbox',
+            '--disable-dev-shm-usage',
+            '--disable-web-security',
+        ],
     });
+
     context = await browser.newContext({
-        userAgent: session.headers['user-agent'],
-        viewport: { width: 1366, height: 768 },
+        userAgent: session.userAgent,
+        viewport: { width: 1920, height: 1080 },
+        locale: 'en-GB',
+        timezoneId: 'Europe/London',
+        permissions: ['geolocation'],
+        geolocation: { longitude: -0.1276, latitude: 51.5074 }, // London coordinates
+        colorScheme: 'light',
         extraHTTPHeaders: {
-            ...HTML_HEADERS,
-            ...session.headers,
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-GB,en-US;q=0.9,en;q=0.8',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'DNT': '1',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'Sec-Fetch-User': '?1',
+            'Cache-Control': 'max-age=0',
         },
     });
+
+    // Add stealth scripts to mask automation
+    await context.addInitScript(() => {
+        // Override the navigator.webdriver property
+        Object.defineProperty(navigator, 'webdriver', {
+            get: () => false,
+        });
+
+        // Mock plugins
+        Object.defineProperty(navigator, 'plugins', {
+            get: () => [1, 2, 3, 4, 5],
+        });
+
+        // Mock languages
+        Object.defineProperty(navigator, 'languages', {
+            get: () => ['en-GB', 'en-US', 'en'],
+        });
+
+        // Chrome object (some sites check for this)
+        window.chrome = {
+            runtime: {},
+        };
+
+        // Permissions
+        const originalQuery = window.navigator.permissions.query;
+        window.navigator.permissions.query = (parameters) => (
+            parameters.name === 'notifications' ?
+                Promise.resolve({ state: Notification.permission }) :
+                originalQuery(parameters)
+        );
+    });
+
     page = await context.newPage();
+
+    // Add random mouse movements to simulate human behavior
+    await page.mouse.move(Math.random() * 100, Math.random() * 100);
+
     return page;
 };
 
 const fetchPage = async (url, session, proxyConfiguration, { isJson = false, referer } = {}) => {
     let lastError;
-    for (let attempt = 1; attempt <= MAX_SEARCH_RETRIES; attempt++) {
+    const maxRetries = 3; // Reduced to avoid repeated blocks
+
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
         try {
             const pg = await ensurePage(session, proxyConfiguration);
+
+            // Add random delay to simulate human behavior
+            if (attempt > 1) {
+                const exponentialDelay = 1000 * attempt + Math.random() * 500;
+                await delay(exponentialDelay);
+                log.info(`Retry attempt ${attempt}/${maxRetries} after ${Math.round(exponentialDelay)}ms delay`);
+            }
+
             const headers = {
                 ...(isJson ? JSON_HEADERS : HTML_HEADERS),
                 ...session.headers,
@@ -183,50 +318,98 @@ const fetchPage = async (url, session, proxyConfiguration, { isJson = false, ref
             if (isJson) {
                 const response = await context.request.get(url, {
                     headers,
-                    timeout: 25000,
+                    timeout: 45000, // Increased timeout for Cloudflare challenges
                 });
                 const statusCode = response.status();
+
                 if (statusCode === 403 || statusCode === 429) {
                     log.warning(`Request blocked (${statusCode}) on attempt ${attempt}, rotating session and retrying...`);
                     rotateSession(session);
                     await closeContext();
-                    await delay(600 * attempt);
                     continue;
                 }
+
                 if (statusCode >= 500) {
                     log.warning(`Server error ${statusCode} on attempt ${attempt} for ${url}`);
                     await delay(500 * attempt);
                     continue;
                 }
+
                 const body = await response.text();
                 return { statusCode, body };
             }
 
+            // For HTML requests, use page.goto with network idle
             await context.setExtraHTTPHeaders(headers);
-            const response = await pg.goto(url, { waitUntil: 'domcontentloaded', timeout: 25000 });
+
+            // Navigate with longer timeout to handle Cloudflare challenges
+            const response = await pg.goto(url, {
+                waitUntil: 'networkidle',
+                timeout: 45000
+            });
+
             const statusCode = response?.status() ?? 0;
+
+            // Check for Cloudflare challenge page
+            const pageContent = await pg.content();
+            const isCloudflareChallenge = pageContent.includes('cf-browser-verification') ||
+                pageContent.includes('Just a moment') ||
+                pageContent.includes('Checking your browser');
+
+            if (isCloudflareChallenge) {
+                log.info('Cloudflare challenge detected, waiting for resolution...');
+                try {
+                    // Wait for Cloudflare to resolve (max 15 seconds)
+                    await pg.waitForLoadState('networkidle', { timeout: 15000 });
+                    await delay(2000); // Additional wait for JS to execute
+
+                    // Check if we're past the challenge
+                    const newContent = await pg.content();
+                    if (newContent.includes('cf-browser-verification') || newContent.includes('Just a moment')) {
+                        log.warning('Cloudflare challenge not resolved, will retry...');
+                        rotateSession(session);
+                        await closeContext();
+                        continue;
+                    }
+
+                    log.info('Cloudflare challenge passed!');
+                } catch (cfError) {
+                    log.warning(`Cloudflare wait timeout: ${cfError.message}`);
+                    rotateSession(session);
+                    await closeContext();
+                    continue;
+                }
+            }
+
             if (statusCode === 403 || statusCode === 429) {
                 log.warning(`Request blocked (${statusCode}) on attempt ${attempt}, rotating session and retrying...`);
                 rotateSession(session);
                 await closeContext();
-                await delay(600 * attempt);
                 continue;
             }
+
             if (statusCode >= 500) {
                 log.warning(`Server error ${statusCode} on attempt ${attempt} for ${url}`);
                 await delay(500 * attempt);
                 continue;
             }
+
             const body = response ? await response.text() : await pg.content();
             return { statusCode, body };
+
         } catch (error) {
             lastError = error;
             log.warning(`Fetch attempt ${attempt} failed for ${url}: ${error.message}`);
-            await closeContext();
-            await delay(500 * attempt);
+
+            // Rotate session on any error
+            if (attempt < maxRetries) {
+                rotateSession(session);
+                await closeContext();
+            }
         }
     }
-    log.error(`Failed to fetch ${url} after ${MAX_SEARCH_RETRIES} attempts: ${lastError?.message || 'Unknown error'}`);
+
+    log.error(`Failed to fetch ${url} after ${maxRetries} attempts: ${lastError?.message || 'Unknown error'}`);
     return null;
 };
 
@@ -613,6 +796,9 @@ try {
     const seen = new Set();
     const counters = { json: 0, jsonld: 0, html: 0, detailEnhanced: 0, pages: 0 };
 
+    // Warm up session to bypass Cloudflare before scraping
+    await warmupSession(session, proxyConf);
+
     for (const seed of startList) {
         let currentUrl = seed;
         let page = 1;
@@ -643,7 +829,8 @@ try {
                 seen.add(key);
 
                 if (includeDetails && normalized.url) {
-                    await delay(300 + Math.random() * 400);
+                    // Add realistic delay before fetching detail page
+                    await delay(500 + Math.random() * 500);
                     // Try bolt-on API first if we have an ID, then detail page
                     const bolt = await fetchBoltOn(normalized.listingId, session, proxyConf, currentUrl);
                     if (bolt?.data) {
@@ -672,7 +859,8 @@ try {
 
             currentUrl = nextPage;
             page += 1;
-            await delay(600 + Math.random() * 1200);
+            // Longer delays between pages to appear more human-like
+            await delay(800 + Math.random() * 1200);
         }
 
         if (saved >= RESULTS_WANTED) break;
