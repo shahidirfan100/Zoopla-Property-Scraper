@@ -149,8 +149,27 @@ const ensurePage = async (session, proxyConfiguration) => {
         window.chrome = { runtime: {}, loadTimes: function () { }, csi: function () { } };
     });
 
+    // Block unnecessary resources for faster page loads (Apify best practice)
+    await context.route('**/*', (route) => {
+        const resourceType = route.request().resourceType();
+        const url = route.request().url();
+
+        // Block images, fonts, stylesheets, and media
+        if (['image', 'font', 'stylesheet', 'media'].includes(resourceType)) {
+            route.abort();
+        }
+        // Block analytics and tracking scripts
+        else if (url.includes('analytics') || url.includes('tracking') ||
+            url.includes('gtag') || url.includes('facebook') ||
+            url.includes('doubleclick') || url.includes('ads')) {
+            route.abort();
+        }
+        else {
+            route.continue();
+        }
+    });
+
     page = await context.newPage();
-    await page.mouse.move(Math.random() * 100, Math.random() * 100);
     return page;
 };
 
@@ -158,17 +177,13 @@ const warmupSession = async (session, proxyConfiguration) => {
     log.info('Warming up session with Playwright/Camoufox...');
     try {
         const pg = await ensurePage(session, proxyConfiguration);
-        await pg.goto('https://www.zoopla.co.uk/', { waitUntil: 'networkidle', timeout: 45000 });
+        await pg.goto('https://www.zoopla.co.uk/', { waitUntil: 'load', timeout: 20000 });
 
         const content = await pg.content();
         if (content.includes('cf-browser-verification') || content.includes('Just a moment')) {
             log.info('Cloudflare challenge detected, waiting...');
-            await pg.waitForLoadState('networkidle', { timeout: 15000 });
-            await delay(2000);
+            await delay(3000);
         }
-
-        await pg.mouse.move(300 + Math.random() * 200, 200 + Math.random() * 100);
-        await delay(500 + Math.random() * 500);
 
         log.info('Session warmup successful!');
         return true;
@@ -1125,25 +1140,20 @@ try {
             const pg = await ensurePage(session, proxyConf);
 
             try {
-                await pg.goto(currentUrl, { waitUntil: 'networkidle', timeout: 60000 });
+                await pg.goto(currentUrl, { waitUntil: 'load', timeout: 30000 });
 
-                // Check for Cloudflare challenge and wait longer for it to resolve
+                // Check for Cloudflare challenge
                 const pageContent = await pg.content();
                 const isCloudflareChallenge = pageContent.includes('cf-browser-verification') ||
                     pageContent.includes('Just a moment') ||
                     pageContent.includes('Checking your browser');
 
                 if (isCloudflareChallenge) {
-                    log.info('Cloudflare challenge detected, waiting for resolution...');
-                    await pg.waitForLoadState('networkidle', { timeout: 30000 });
-                    await delay(8000); // Wait longer for Cloudflare to fully resolve
+                    log.info('Cloudflare challenge detected, waiting...');
+                    await delay(5000);
                 }
 
-                // Scroll down to trigger lazy loading of listings
-                await pg.evaluate(() => window.scrollTo(0, 500));
-                await delay(1000);
-                await pg.evaluate(() => window.scrollTo(0, 1000));
-                await delay(1000);
+                await delay(500); // Brief wait for dynamic content
 
                 // Step 2: Extract listing URLs from the page
                 const listingUrls = await extractListingUrlsFromPage(pg);
@@ -1175,12 +1185,12 @@ try {
                     seen.add(listingId);
 
                     log.debug(`Fetching details for listing ${listingId}: ${listingUrl}`);
-                    await delay(500 + Math.random() * 500); // Realistic delay
+                    await delay(200); // Minimal delay
 
                     try {
                         // Navigate to detail page with Playwright
-                        await pg.goto(listingUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
-                        await delay(1000); // Wait for dynamic content
+                        await pg.goto(listingUrl, { waitUntil: 'load', timeout: 15000 });
+                        await delay(300); // Brief wait for __ZAD_TARGETING__ script
 
                         const detailHtml = await pg.content();
                         log.debug(`Fetched ${detailHtml.length} chars HTML via Playwright`);
@@ -1220,7 +1230,7 @@ try {
 
                 currentUrl = nextPageUrl;
                 pageNum += 1;
-                await delay(800 + Math.random() * 1200); // Delay between pages
+                await delay(500); // Brief delay between pages
 
             } catch (error) {
                 log.error(`Error processing page ${currentUrl}: ${error.message}`);
