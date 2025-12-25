@@ -86,66 +86,88 @@ const rotateSession = (session) => {
     session.headers = fresh.headers;
 };
 
-const warmupSession = async (session, proxyConfiguration) => {
-    log.info('Running Playwright bootstrap to obtain fresh cookies...');
+// Fetch search page HTML using got-scraping
+const fetchSearchPageWithGot = async (url, session, proxyConfiguration) => {
     try {
-        const pg = await ensurePage(session, proxyConfiguration);
-
-        // Visit homepage first to establish session
-        await pg.goto('https://www.zoopla.co.uk/', {
-            waitUntil: 'networkidle',
-            timeout: 45000
-        });
-
-        // Check for Cloudflare challenge
-        const content = await pg.content();
-        if (content.includes('cf-browser-verification') || content.includes('Just a moment')) {
-            log.info('Cloudflare challenge on homepage, waiting...');
-            await pg.waitForLoadState('networkidle', { timeout: 15000 });
-            await delay(2000);
+        let proxyUrl = null;
+        if (proxyConfiguration) {
+            proxyUrl = await proxyConfiguration.newUrl();
         }
 
-        // Add some human-like interactions
-        await pg.mouse.move(300 + Math.random() * 200, 200 + Math.random() * 100);
-        await delay(500 + Math.random() * 500);
+        const response = await gotScraping({
+            url,
+            method: 'GET',
+            proxyUrl,
+            headers: {
+                'User-Agent': session.userAgent,
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+                'Accept-Language': 'en-GB,en-US;q=0.9,en;q=0.8',
+                'Accept-Encoding': 'gzip, deflate, br',
+                'DNT': '1',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1',
+                'Sec-Fetch-Dest': 'document',
+                'Sec-Fetch-Mode': 'navigate',
+                'Sec-Fetch-Site': 'none',
+                'Sec-Fetch-User': '?1',
+                'Cache-Control': 'max-age=0',
+            },
+            timeout: {
+                request: 30000,
+            },
+        });
 
-        log.info('Session warmup successful!');
-        return true;
+        return response.body;
     } catch (error) {
-        log.warning(`Playwright bootstrap failed: ${error.message}`);
-        await closeContext();
-        return false;
+        log.warning(`got-scraping failed for ${url}: ${error.message}`);
+        return null;
     }
 };
 
-// Extract listing URLs from the current Playwright page
-const extractListingUrlsFromPage = async (page) => {
+// Extract listing URLs from search page HTML using Cheerio
+const extractListingUrlsFromHtml = (html) => {
     try {
-        // Wait for listings to load
-        await page.waitForSelector('a[href*="/for-sale/details/"], a[href*="/to-rent/details/"], a[href*="/details/"]', { timeout: 10000 });
+        const $ = cheerioLoad(html);
+        const urls = new Set();
 
-        // Extract all listing URLs using page.evaluate
-        const urls = await page.evaluate(() => {
-            const links = Array.from(document.querySelectorAll('a[href*="/for-sale/details/"], a[href*="/to-rent/details/"], a[href*="/details/"]'));
-            const uniqueUrls = new Set();
-
-            links.forEach(link => {
-                const href = link.getAttribute('href');
-                if (href && href.includes('/details/')) {
-                    // Convert to absolute URL
-                    const absolute = href.startsWith('http') ? href : `https://www.zoopla.co.uk${href}`;
-                    uniqueUrls.add(absolute);
-                }
-            });
-
-            return Array.from(uniqueUrls);
+        // Find all links to detail pages
+        $('a[href*="/for-sale/details/"], a[href*="/to-rent/details/"], a[href*="/details/"]').each((_, el) => {
+            const href = $(el).attr('href');
+            if (href && href.includes('/details/')) {
+                // Convert to absolute URL
+                const absolute = href.startsWith('http') ? href : `https://www.zoopla.co.uk${href}`;
+                urls.add(absolute);
+            }
         });
 
-        log.info(`Extracted ${urls.length} listing URLs from page`);
-        return urls;
+        const urlArray = Array.from(urls);
+        log.info(`Extracted ${urlArray.length} listing URLs from HTML`);
+        return urlArray;
     } catch (error) {
-        log.warning(`Failed to extract listing URLs: ${error.message}`);
+        log.warning(`Failed to extract listing URLs from HTML: ${error.message}`);
         return [];
+    }
+};
+
+// Extract next page URL from search page HTML
+const extractNextPageUrl = (html, currentUrl) => {
+    try {
+        const $ = cheerioLoad(html);
+
+        // Look for next page link
+        const nextHref = $('link[rel="next"]').attr('href') ||
+            $('a[rel="next"]').attr('href') ||
+            $('a[aria-label*="Next"]').attr('href') ||
+            $('a[title*="Next"]').attr('href');
+
+        if (nextHref) {
+            return nextHref.startsWith('http') ? nextHref : `https://www.zoopla.co.uk${nextHref}`;
+        }
+
+        return null;
+    } catch (error) {
+        log.debug(`Failed to extract next page URL: ${error.message}`);
+        return null;
     }
 };
 
