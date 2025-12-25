@@ -978,117 +978,110 @@ try {
         while (currentUrl && saved < RESULTS_WANTED && pageNum <= MAX_PAGES) {
             log.info(`Processing page ${pageNum}/${MAX_PAGES} (saved: ${saved}/${RESULTS_WANTED}) - ${currentUrl}`);
 
-            // Step 1: Use Playwright to load search page and extract listing URLs (bypasses Cloudflare)
+            // Step 1: Use Playwright to load page and extract listing URLs
             const pg = await ensurePage(session, proxyConf);
 
             try {
                 await pg.goto(currentUrl, { waitUntil: 'networkidle', timeout: 45000 });
+
+                // Check for Cloudflare challenge
+                const pageContent = await pg.content();
+                const isCloudflareChallenge = pageContent.includes('cf-browser-verification') ||
+                    pageContent.includes('Just a moment');
+
+                if (isCloudflareChallenge) {
+                    log.info('Cloudflare challenge detected, waiting...');
+                    await pg.waitForLoadState('networkidle', { timeout: 15000 });
+                    await delay(2000);
+                }
+
+                //Step 2: Extract listing URLs from the page
                 const listingUrls = await extractListingUrlsFromPage(pg);
+                counters.urls += listingUrls.length;
 
-                // Step 1: Use Playwright to load page and extract listing URLs
-                const pg = await ensurePage(session, proxyConf);
-
-                try {
-                    await pg.goto(currentUrl, { waitUntil: 'networkidle', timeout: 45000 });
-
-                    // Check for Cloudflare challenge
-                    const pageContent = await pg.content();
-                    const isCloudflareChallenge = pageContent.includes('cf-browser-verification') ||
-                        pageContent.includes('Just a moment');
-
-                    if (isCloudflareChallenge) {
-                        log.info('Cloudflare challenge detected, waiting...');
-                        await pg.waitForLoadState('networkidle', { timeout: 15000 });
-                        await delay(2000);
-                    }
-
-                    //Step 2: Extract listing URLs from the page
-                    const listingUrls = await extractListingUrlsFromPage(pg);
-                    counters.urls += listingUrls.length;
-
-                    if (listingUrls.length === 0) {
-                        log.warning('No listing URLs found on this page, stopping pagination');
-                        break;
-                    }
-
-                    log.info(`Found ${listingUrls.length} listing URLs, fetching details via HTTP...`);
-
-                    // Step 3: Fetch each listing detail page using got-scraping (fast & cheap)
-                    for (const listingUrl of listingUrls) {
-                        if (saved >= RESULTS_WANTED) break;
-
-                        // Check if we've already processed this listing
-                        const listingId = listingUrl.match(/details\/(\d+)/)?.[1];
-                        if (!listingId) {
-                            log.warning(`No listing ID found in URL: ${listingUrl}`);
-                            continue;
-                        }
-
-                        if (seen.has(listingId)) {
-                            log.debug(`Skipping duplicate listing ID: ${listingId}`);
-                            continue;
-                        }
-                        seen.add(listingId);
-
-                        log.debug(`Fetching details for listing ${listingId}: ${listingUrl}`);
-                        await delay(300 + Math.random() * 300); // Realistic delay
-
-                        const detailHtml = await fetchDetailPageWithGot(listingUrl, session, proxyConf);
-                        if (!detailHtml) {
-                            log.warning(`Failed to fetch HTML for ${listingUrl}`);
-                            continue;
-                        }
-
-                        log.debug(`Fetched ${detailHtml.length} chars HTML, extracting property data...`);
-
-                        // Extract property data from detail page HTML
-                        const property = extractDetailFromHtml(detailHtml, listingUrl, listingType, location);
-                        if (property && property.listingId) {
-                            await Dataset.pushData(cleanItem(property));
-                            saved += 1;
-                            counters.detailEnhanced += 1;
-                            log.info(`✓ Saved property ${saved}/${RESULTS_WANTED}: ${property.address || property.title}`);
-
-                            if (saved % 10 === 0) {
-                                log.info(`Progress: ${saved}/${RESULTS_WANTED} properties saved`);
-                            }
-                        } else {
-                            log.warning(`Failed to extract property data from ${listingUrl}`);
-                        }
-                    }
-
-                    counters.pages += 1;
-
-                    // Step 4: Find next page URL
-                    const nextPageUrl = await pg.evaluate(() => {
-                        const nextLink = document.querySelector('a[rel=\"next\"], a[aria-label*=\"Next\"], a[title*=\"Next\"]');
-                        return nextLink ? nextLink.href : null;
-                    });
-
-                    if (!nextPageUrl) {
-                        log.info('No next page found, stopping pagination');
-                        break;
-                    }
-
-                    currentUrl = nextPageUrl;
-                    pageNum += 1;
-                    await delay(800 + Math.random() * 1200); // Delay between pages
-
-                } catch (error) {
-                    log.error(`Error processing page ${currentUrl}: ${error.message}`);
+                if (listingUrls.length === 0) {
+                    log.warning('No listing URLs found on this page, stopping pagination');
                     break;
                 }
-            }
 
-        if (saved >= RESULTS_WANTED) break;
+                log.info(`Found ${listingUrls.length} listing URLs, fetching details via HTTP...`);
+
+                // Step 3: Fetch each listing detail page using got-scraping (fast & cheap)
+                for (const listingUrl of listingUrls) {
+                    if (saved >= RESULTS_WANTED) break;
+
+                    // Check if we've already processed this listing
+                    const listingId = listingUrl.match(/details\/(\d+)/)?.[1];
+                    if (!listingId) {
+                        log.warning(`No listing ID found in URL: ${listingUrl}`);
+                        continue;
+                    }
+
+                    if (seen.has(listingId)) {
+                        log.debug(`Skipping duplicate listing ID: ${listingId}`);
+                        continue;
+                    }
+                    seen.add(listingId);
+
+                    log.debug(`Fetching details for listing ${listingId}: ${listingUrl}`);
+                    await delay(300 + Math.random() * 300); // Realistic delay
+
+                    const detailHtml = await fetchDetailPageWithGot(listingUrl, session, proxyConf);
+                    if (!detailHtml) {
+                        log.warning(`Failed to fetch HTML for ${listingUrl}`);
+                        continue;
+                    }
+
+                    log.debug(`Fetched ${detailHtml.length} chars HTML, extracting property data...`);
+
+                    // Extract property data from detail page HTML
+                    const property = extractDetailFromHtml(detailHtml, listingUrl, listingType, location);
+                    if (property && property.listingId) {
+                        await Dataset.pushData(cleanItem(property));
+                        saved += 1;
+                        counters.detailEnhanced += 1;
+                        log.info(`✓ Saved property ${saved}/${RESULTS_WANTED}: ${property.address || property.title}`);
+
+                        if (saved % 10 === 0) {
+                            log.info(`Progress: ${saved}/${RESULTS_WANTED} properties saved`);
+                        }
+                    } else {
+                        log.warning(`Failed to extract property data from ${listingUrl}`);
+                    }
+                }
+
+                counters.pages += 1;
+
+                // Step 4: Find next page URL
+                const nextPageUrl = await pg.evaluate(() => {
+                    const nextLink = document.querySelector('a[rel=\"next\"], a[aria-label*=\"Next\"], a[title*=\"Next\"]');
+                    return nextLink ? nextLink.href : null;
+                });
+
+                if (!nextPageUrl) {
+                    log.info('No next page found, stopping pagination');
+                    break;
+                }
+
+                currentUrl = nextPageUrl;
+                pageNum += 1;
+                await delay(800 + Math.random() * 1200); // Delay between pages
+
+            } catch (error) {
+                log.error(`Error processing page ${currentUrl}: ${error.message}`);
+                break;
+            }
         }
 
-        log.info(
-            `Scraping completed. Saved ${saved} properties. Pages: ${counters.pages}. URLs extracted: ${counters.urls}. Detail pages fetched: ${counters.detailEnhanced}.`,
-        );
-    } catch (error) {
-        log.exception(error, 'Actor failed');
-        throw error;
-    } finally {
-        await Actor.exit();
+        if (saved >= RESULTS_WANTED) break;
     }
+
+    log.info(
+        `Scraping completed. Saved ${saved} properties. Pages: ${counters.pages}. URLs extracted: ${counters.urls}. Detail pages fetched: ${counters.detailEnhanced}.`,
+    );
+} catch (error) {
+    log.exception(error, 'Actor failed');
+    throw error;
+} finally {
+    await Actor.exit();
+}
