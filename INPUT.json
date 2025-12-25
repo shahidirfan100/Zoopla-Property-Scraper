@@ -1,0 +1,14 @@
+{
+  "location": "london",
+  "listingType": "for-sale",
+  "propertyType": "property",
+  "minPrice": 300000,
+  "maxPrice": 600000,
+  "includeDetails": true,
+  "resultsWanted": 50,
+  "maxPages": 5,
+  "proxyConfiguration": {
+    "useApifyProxy": true,
+    "apifyProxyGroups": ["RESIDENTIAL"]
+  }
+}

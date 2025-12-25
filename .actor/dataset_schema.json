@@ -1,0 +1,165 @@
+{
+  "actorSpecification": 1,
+  "fields": {},
+  "views": {
+    "overview": {
+      "title": "Overview",
+      "transformation": {
+        "fields": [
+          "title",
+          "address",
+          "price",
+          "propertyType",
+          "bedrooms",
+          "bathrooms",
+          "agent",
+          "url"
+        ]
+      },
+      "display": {
+        "component": "table",
+        "properties": {
+          "title": {
+            "label": "Property Title",
+            "format": "text"
+          },
+          "address": {
+            "label": "Address",
+            "format": "text"
+          },
+          "price": {
+            "label": "Price (£)",
+            "format": "text"
+          },
+          "propertyType": {
+            "label": "Type",
+            "format": "text"
+          },
+          "bedrooms": {
+            "label": "Beds",
+            "format": "number"
+          },
+          "bathrooms": {
+            "label": "Baths",
+            "format": "number"
+          },
+          "agent": {
+            "label": "Estate Agent",
+            "format": "text"
+          },
+          "url": {
+            "label": "Property URL",
+            "format": "link"
+          }
+        }
+      }
+    },
+    "detailed": {
+      "title": "Detailed View",
+      "transformation": {
+        "fields": [
+          "listingId",
+          "title",
+          "address",
+          "price",
+          "propertyType",
+          "bedrooms",
+          "bathrooms",
+          "receptions",
+          "tenure",
+          "councilTaxBand",
+          "epcRating",
+          "agent",
+          "agentPhone",
+          "description",
+          "features",
+          "images",
+          "url",
+          "location",
+          "category"
+        ]
+      },
+      "display": {
+        "component": "table",
+        "properties": {
+          "listingId": {
+            "label": "Listing ID",
+            "format": "text"
+          },
+          "title": {
+            "label": "Title",
+            "format": "text"
+          },
+          "address": {
+            "label": "Address",
+            "format": "text"
+          },
+          "price": {
+            "label": "Price",
+            "format": "text"
+          },
+          "propertyType": {
+            "label": "Property Type",
+            "format": "text"
+          },
+          "bedrooms": {
+            "label": "Bedrooms",
+            "format": "number"
+          },
+          "bathrooms": {
+            "label": "Bathrooms",
+            "format": "number"
+          },
+          "receptions": {
+            "label": "Receptions",
+            "format": "number"
+          },
+          "tenure": {
+            "label": "Tenure",
+            "format": "text"
+          },
+          "councilTaxBand": {
+            "label": "Council Tax Band",
+            "format": "text"
+          },
+          "epcRating": {
+            "label": "EPC Rating",
+            "format": "text"
+          },
+          "agent": {
+            "label": "Agent",
+            "format": "text"
+          },
+          "agentPhone": {
+            "label": "Agent Phone",
+            "format": "text"
+          },
+          "description": {
+            "label": "Description",
+            "format": "text"
+          },
+          "features": {
+            "label": "Features",
+            "format": "array"
+          },
+          "images": {
+            "label": "Images",
+            "format": "array"
+          },
+          "url": {
+            "label": "URL",
+            "format": "link"
+          },
+          "location": {
+            "label": "Search Location",
+            "format": "text"
+          },
+          "category": {
+            "label": "Category",
+            "format": "text"
+          }
+        }
+      }
+    }
+  }
+}

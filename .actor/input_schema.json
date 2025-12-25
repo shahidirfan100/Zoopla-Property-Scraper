@@ -1,0 +1,113 @@
+{
+  "title": "Zoopla Property Scraper Input",
+  "description": "Extract UK property listings from Zoopla. Configure search by location, property type, price range, and bedrooms. The scraper uses efficient data extraction with pagination support.",
+  "type": "object",
+  "schemaVersion": 1,
+  "properties": {
+    "startUrl": {
+      "title": "Start URL",
+      "type": "string",
+      "description": "Direct Zoopla search URL to start scraping from. If provided, this overrides location and filter settings.",
+      "editor": "textfield",
+      "example": "https://www.zoopla.co.uk/for-sale/property/london/"
+    },
+    "location": {
+      "title": "Location",
+      "type": "string",
+      "description": "UK location to search for properties (e.g., 'London', 'Manchester', 'Birmingham')",
+      "editor": "textfield",
+      "default": "london",
+      "prefill": "london",
+      "example": "london"
+    },
+    "listingType": {
+      "title": "Listing Type",
+      "type": "string",
+      "description": "Type of property listing to search",
+      "editor": "select",
+      "enum": ["for-sale", "to-rent", "new-homes"],
+      "enumTitles": ["For Sale", "To Rent", "New Homes"],
+      "default": "for-sale",
+      "prefill": "for-sale"
+    },
+    "propertyType": {
+      "title": "Property Type",
+      "type": "string",
+      "description": "Type of property to search for",
+      "editor": "select",
+      "enum": ["property", "houses", "flats", "bungalows"],
+      "enumTitles": ["All Properties", "Houses", "Flats", "Bungalows"],
+      "default": "property",
+      "prefill": "property"
+    },
+    "minPrice": {
+      "title": "Minimum Price (£)",
+      "type": "integer",
+      "description": "Minimum property price in GBP",
+      "editor": "number",
+      "minimum": 0,
+      "example": 200000
+    },
+    "maxPrice": {
+      "title": "Maximum Price (£)",
+      "type": "integer",
+      "description": "Maximum property price in GBP",
+      "editor": "number",
+      "minimum": 0,
+      "example": 500000
+    },
+    "radius": {
+      "title": "Search Radius (miles)",
+      "type": "number",
+      "description": "Search radius from location in miles",
+      "editor": "number",
+      "minimum": 0,
+      "maximum": 40,
+      "example": 5
+    },
+    "includeDetails": {
+      "title": "Scrape Property Details",
+      "type": "boolean",
+      "description": "If enabled, scraper visits each property detail page to extract full information including description, images, and features",
+      "editor": "checkbox",
+      "default": true,
+      "prefill": true
+    },
+    "resultsWanted": {
+      "title": "Maximum Results",
+      "type": "integer",
+      "description": "Maximum number of properties to scrape (leave empty for all available)",
+      "minimum": 1,
+      "default": 100,
+      "prefill": 100,
+      "editor": "number",
+      "example": 100
+    },
+    "maxPages": {
+      "title": "Maximum Pages",
+      "type": "integer",
+      "description": "Maximum number of search result pages to process",
+      "minimum": 1,
+      "editor": "number",
+      "default": 20,
+      "prefill": 20,
+      "example": 20
+    },
+    "proxyConfiguration": {
+      "title": "Proxy Configuration",
+      "type": "object",
+      "description": "Proxy settings to avoid blocking. Residential proxies recommended for Zoopla.",
+      "editor": "proxy",
+      "default": {
+        "useApifyProxy": true,
+        "apifyProxyGroups": ["RESIDENTIAL"]
+      },
+      "prefill": {
+        "useApifyProxy": true,
+        "apifyProxyGroups": ["RESIDENTIAL"]
+      }
+    }
+  },
+  "required": [],
+  "additionalProperties": false
+}
