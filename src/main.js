@@ -1,12 +1,13 @@
-// Zoopla Property Scraper - Production-grade Firefox stealth scraper
+// Zoopla Property Scraper - Production-grade Camoufox stealth scraper (Apify recommended pattern)
 import { Actor, log } from 'apify';
 import { Dataset } from 'crawlee';
 import { load as cheerioLoad } from 'cheerio';
+import { launchOptions as camoufoxLaunchOptions } from 'camoufox-js';
 import { firefox } from 'playwright';
 import { randomUUID } from 'node:crypto';
 import { URL } from 'node:url';
 
-// Authentic Firefox user agents for Windows
+// Authentic Firefox user agents for Camoufox
 const FIREFOX_USER_AGENTS = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) Gecko/20100101 Firefox/122.0',
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0',
@@ -77,24 +78,6 @@ const rotateSession = (session) => {
     session.id = fresh.id;
     session.userAgent = fresh.userAgent;
     session.headers = fresh.headers;
-};
-
-const toPlaywrightProxy = async (proxyConfiguration) => {
-    if (!proxyConfiguration) return null;
-    const proxyUrl = await proxyConfiguration.newUrl();
-    if (!proxyUrl) return null;
-    try {
-        const parsed = new URL(proxyUrl);
-        const server = `${parsed.protocol}//${parsed.hostname}:${parsed.port}`;
-        return {
-            server,
-            username: decodeURIComponent(parsed.username || ''),
-            password: decodeURIComponent(parsed.password || ''),
-        };
-    } catch (err) {
-        log.warning(`Failed to parse proxy URL for Playwright: ${err.message}`);
-        return null;
-    }
 };
 
 const warmupSession = async (session, proxyConfiguration) => {
@@ -189,48 +172,23 @@ const closeContext = async () => {
 const ensurePage = async (session, proxyConfiguration) => {
     if (page && !page.isClosed()) return page;
     await closeContext();
-    const proxy = await toPlaywrightProxy(proxyConfiguration);
 
-    // Comprehensive Firefox stealth options
-    browser = await firefox.launch({
+    // Get proxy URL for Camoufox
+    let proxyUrl = null;
+    if (proxyConfiguration) {
+        proxyUrl = await proxyConfiguration.newUrl();
+    }
+
+    // Launch Firefox with Camoufox options (Apify recommended pattern)
+    browser = await firefox.launch(await camoufoxLaunchOptions({
         headless: true,
-        proxy: proxy || undefined,
-        firefoxUserPrefs: {
-            // Disable WebDriver flag
-            'useAutomationExtension': false,
-            'dom.webdriver.enabled': false,
-
-            // Privacy & fingerprinting protection
-            'privacy.resistFingerprinting': true,
-            'privacy.trackingprotection.enabled': true,
-
-            // Disable automation indicators
-            'devtools.console.stdout.content': false,
-            'browser.tabs.remote.autostart': true,
-            'browser.tabs.remote.autostart.2': true,
-
-            // Realistic media settings
-            'media.navigator.enabled': true,
-            'media.peerconnection.enabled': true,
-
-            // Language and locale
-            'intl.accept_languages': 'en-GB,en-US;q=0.9,en;q=0.8',
-            'javascript.enabled': true,
-
-            // Canvas and WebGL fingerprinting
-            'webgl.disabled': false,
-            'privacy.resistFingerprinting.block_mozAddonManager': true,
-
-            // Disable automation detection
-            'marionette.enabled': false,
-        },
+        proxy: proxyUrl,
+        geoip: true,  // Enable GeoIP spoofing for better stealth
         args: [
-            '--disable-blink-features=AutomationControlled',
             '--no-sandbox',
             '--disable-dev-shm-usage',
-            '--disable-web-security',
         ],
-    });
+    }));
 
     context = await browser.newContext({
         userAgent: session.userAgent,
@@ -255,35 +213,14 @@ const ensurePage = async (session, proxyConfiguration) => {
         },
     });
 
-    // Add stealth scripts to mask automation
+    // Camoufox has built-in stealth, minimal extra scripts needed
     await context.addInitScript(() => {
-        // Override the navigator.webdriver property
-        Object.defineProperty(navigator, 'webdriver', {
-            get: () => false,
-        });
-
-        // Mock plugins
-        Object.defineProperty(navigator, 'plugins', {
-            get: () => [1, 2, 3, 4, 5],
-        });
-
-        // Mock languages
-        Object.defineProperty(navigator, 'languages', {
-            get: () => ['en-GB', 'en-US', 'en'],
-        });
-
-        // Chrome object (some sites check for this)
+        // Additional Chrome object for compatibility
         window.chrome = {
             runtime: {},
+            loadTimes: function () { },
+            csi: function () { },
         };
-
-        // Permissions
-        const originalQuery = window.navigator.permissions.query;
-        window.navigator.permissions.query = (parameters) => (
-            parameters.name === 'notifications' ?
-                Promise.resolve({ state: Notification.permission }) :
-                originalQuery(parameters)
-        );
     });
 
     page = await context.newPage();
