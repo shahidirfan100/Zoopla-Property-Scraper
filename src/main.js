@@ -1,7 +1,8 @@
-// Zoopla Property Scraper - Production-grade Camoufox stealth scraper (Apify recommended pattern)
+// Zoopla Property Scraper - Hybrid approach: Playwright for URLs, got-scraping for data
 import { Actor, log } from 'apify';
 import { Dataset } from 'crawlee';
 import { load as cheerioLoad } from 'cheerio';
+import { gotScraping } from 'got-scraping';
 import { launchOptions as camoufoxLaunchOptions } from 'camoufox-js';
 import { firefox } from 'playwright';
 import { randomUUID } from 'node:crypto';
@@ -109,6 +110,75 @@ const warmupSession = async (session, proxyConfiguration) => {
         log.warning(`Playwright bootstrap failed: ${error.message}`);
         await closeContext();
         return false;
+    }
+};
+
+// Extract listing URLs from the current Playwright page
+const extractListingUrlsFromPage = async (page) => {
+    try {
+        // Wait for listings to load
+        await page.waitForSelector('a[href*="/for-sale/details/"], a[href*="/to-rent/details/"], a[href*="/details/"]', { timeout: 10000 });
+
+        // Extract all listing URLs using page.evaluate
+        const urls = await page.evaluate(() => {
+            const links = Array.from(document.querySelectorAll('a[href*="/for-sale/details/"], a[href*="/to-rent/details/"], a[href*="/details/"]'));
+            const uniqueUrls = new Set();
+
+            links.forEach(link => {
+                const href = link.getAttribute('href');
+                if (href && href.includes('/details/')) {
+                    // Convert to absolute URL
+                    const absolute = href.startsWith('http') ? href : `https://www.zoopla.co.uk${href}`;
+                    uniqueUrls.add(absolute);
+                }
+            });
+
+            return Array.from(uniqueUrls);
+        });
+
+        log.info(`Extracted ${urls.length} listing URLs from page`);
+        return urls;
+    } catch (error) {
+        log.warning(`Failed to extract listing URLs: ${error.message}`);
+        return [];
+    }
+};
+
+// Fetch detail page HTML using got-scraping (fast and cheap)
+const fetchDetailPageWithGot = async (url, session, proxyConfiguration) => {
+    try {
+        let proxyUrl = null;
+        if (proxyConfiguration) {
+            proxyUrl = await proxyConfiguration.newUrl();
+        }
+
+        const response = await gotScraping({
+            url,
+            method: 'GET',
+            proxyUrl,
+            headers: {
+                'User-Agent': session.userAgent,
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+                'Accept-Language': 'en-GB,en-US;q=0.9,en;q=0.8',
+                'Accept-Encoding': 'gzip, deflate, br',
+                'DNT': '1',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1',
+                'Sec-Fetch-Dest': 'document',
+                'Sec-Fetch-Mode': 'navigate',
+                'Sec-Fetch-Site': 'none',
+                'Sec-Fetch-User': '?1',
+                'Cache-Control': 'max-age=0',
+            },
+            timeout: {
+                request: 30000,
+            },
+        });
+
+        return response.body;
+    } catch (error) {
+        log.warning(`got-scraping failed for ${url}: ${error.message}`);
+        return null;
     }
 };
 
@@ -694,6 +764,75 @@ const mergeDetail = (base, detail) => {
     if (detail.coordinates && !base.coordinates) base.coordinates = detail.coordinates;
 };
 
+// Extract property data from detail page HTML
+const extractDetailFromHtml = (html, url, listingType, searchLocation) => {
+    try {
+        const $ = cheerioLoad(html);
+
+        // Try to extract __NEXT_DATA__
+        const embedded = extractEmbeddedJson(html);
+        if (embedded) {
+            const detailJson = extractDetailFromJson(embedded);
+            if (detailJson) {
+                log.debug(`Extracted detail from __NEXT_DATA__ for ${url}`);
+                return normalizeListing(detailJson, listingType, searchLocation, url);
+            }
+        }
+
+        // Try JSON-LD
+        const detailLd = extractDetailFromJsonLd($, url);
+        if (detailLd) {
+            log.debug(`Extracted detail from JSON-LD for ${url}`);
+            return normalizeListing(detailLd, listingType, searchLocation, url);
+        }
+
+        // Fallback to HTML parsing
+        const listingId = url.match(/details\/(\\d+)/)?.[1];
+        const title = $('h1').first().text().trim();
+        const price = $('[data-testid*="price"], .ui-pricing').first().text().trim();
+        const address = $('[data-testid*="address"], .ui-property-summary__address').first().text().trim();
+        const description = $('[data-testid="description"], .dp-description__text').first().text().trim();
+
+        // Extract bedrooms, bathrooms
+        const bedroomsText = $('[data-testid*="bed"], .c-PJLV').text();
+        const bathroomsText = $('[data-testid*="bath"], .c-PJLV').text();
+        const bedrooms = bedroomsText.match(/(\d+)/)?.[1];
+        const bathrooms = bathroomsText.match(/(\d+)/)?.[1];
+
+        // Extract images
+        const images = [];
+        $('img[src*="zoopla"], img[data-src*="zoopla"]').each((_, img) => {
+            const src = $(img).attr('src') || $(img).attr('data-src');
+            if (src && !src.includes('logo') && !src.includes('icon')) {
+                images.push(src);
+            }
+        });
+
+        if (!listingId && !title && !price) {
+            log.warning(`Could not extract minimal data from ${url}`);
+            return null;
+        }
+
+        log.debug(`Extracted detail from HTML parsing for ${url}`);
+        return cleanItem({
+            listingId,
+            title: title || address,
+            address,
+            price,
+            description,
+            bedrooms: bedrooms ? parseInt(bedrooms) : null,
+            bathrooms: bathrooms ? parseInt(bathrooms) : null,
+            images: images.length > 0 ? images : null,
+            url,
+            category: listingType,
+            location: searchLocation,
+        });
+    } catch (error) {
+        log.warning(`Failed to extract detail from ${url}: ${error.message}`);
+        return null;
+    }
+};
+
 const enrichWithDetail = async (url, session, proxyConfiguration, referer) => {
     let lastError;
     for (let attempt = 1; attempt <= DETAIL_RETRIES; attempt++) {
@@ -762,80 +901,104 @@ try {
 
     let saved = 0;
     const seen = new Set();
-    const counters = { json: 0, jsonld: 0, html: 0, detailEnhanced: 0, pages: 0 };
+    const counters = { json: 0, jsonld: 0, html: 0, detailEnhanced: 0, pages: 0, urls: 0 };
 
     // Warm up session to bypass Cloudflare before scraping
     await warmupSession(session, proxyConf);
 
     for (const seed of startList) {
         let currentUrl = seed;
-        let page = 1;
+        let pageNum = 1;
 
-        while (currentUrl && saved < RESULTS_WANTED && page <= MAX_PAGES) {
-            log.info(`Processing page ${page}/${MAX_PAGES} (saved: ${saved}/${RESULTS_WANTED}) - ${currentUrl}`);
-            const response = await fetchPage(currentUrl, session, proxyConf, { isJson: false });
-            if (!response) {
-                log.warning(`No response for ${currentUrl}, stopping this seed`);
-                break;
-            }
+        while (currentUrl && saved < RESULTS_WANTED && pageNum <= MAX_PAGES) {
+            log.info(`Processing page ${pageNum}/${MAX_PAGES} (saved: ${saved}/${RESULTS_WANTED}) - ${currentUrl}`);
 
-            counters.pages += 1;
-            const { listings, nextPage, source } = extractSearchPayload(response.body, currentUrl);
-            if (!listings.length) {
-                log.warning('No listings found on this page, stopping pagination for this seed');
-                break;
-            }
-            if (source) counters[source] = (counters[source] || 0) + 1;
-            log.info(`Extracted ${listings.length} listings from ${source || 'unknown'} source`);
+            // Step 1: Use Playwright to load page and extract listing URLs
+            const pg = await ensurePage(session, proxyConf);
 
-            for (const raw of listings) {
-                if (saved >= RESULTS_WANTED) break;
-                const normalized = normalizeListing(raw, listingType, location, currentUrl);
-                const key = normalized.listingId || normalized.url;
-                if (!key) continue;
-                if (seen.has(key)) continue;
-                seen.add(key);
+            try {
+                await pg.goto(currentUrl, { waitUntil: 'networkidle', timeout: 45000 });
 
-                if (includeDetails && normalized.url) {
-                    // Add realistic delay before fetching detail page
-                    await delay(500 + Math.random() * 500);
-                    // Try bolt-on API first if we have an ID, then detail page
-                    const bolt = await fetchBoltOn(normalized.listingId, session, proxyConf, currentUrl);
-                    if (bolt?.data) {
-                        mergeDetail(normalized, bolt.data);
+                // Check for Cloudflare challenge
+                const pageContent = await pg.content();
+                const isCloudflareChallenge = pageContent.includes('cf-browser-verification') ||
+                    pageContent.includes('Just a moment');
+
+                if (isCloudflareChallenge) {
+                    log.info('Cloudflare challenge detected, waiting...');
+                    await pg.waitForLoadState('networkidle', { timeout: 15000 });
+                    await delay(2000);
+                }
+
+                //Step 2: Extract listing URLs from the page
+                const listingUrls = await extractListingUrlsFromPage(pg);
+                counters.urls += listingUrls.length;
+
+                if (listingUrls.length === 0) {
+                    log.warning('No listing URLs found on this page, stopping pagination');
+                    break;
+                }
+
+                log.info(`Found ${listingUrls.length} listing URLs, fetching details via HTTP...`);
+
+                // Step 3: Fetch each listing detail page using got-scraping (fast & cheap)
+                for (const listingUrl of listingUrls) {
+                    if (saved >= RESULTS_WANTED) break;
+
+                    // Check if we've already processed this listing
+                    const listingId = listingUrl.match(/details\/(\\d+)/)?.[1];
+                    if (!listingId || seen.has(listingId)) continue;
+                    seen.add(listingId);
+
+                    await delay(300 + Math.random() * 300); // Realistic delay
+
+                    const detailHtml = await fetchDetailPageWithGot(listingUrl, session, proxyConf);
+                    if (!detailHtml) {
+                        log.warning(`Failed to fetch ${listingUrl}`);
+                        continue;
+                    }
+
+                    // Extract property data from detail page HTML
+                    const property = extractDetailFromHtml(detailHtml, listingUrl, listingType, location);
+                    if (property && property.listingId) {
+                        await Dataset.pushData(cleanItem(property));
+                        saved += 1;
                         counters.detailEnhanced += 1;
-                    } else {
-                        const detail = await enrichWithDetail(normalized.url, session, proxyConf, currentUrl);
-                        if (detail) {
-                            mergeDetail(normalized, detail);
-                            counters.detailEnhanced += 1;
+
+                        if (saved % 10 === 0) {
+                            log.info(`Progress: ${saved}/${RESULTS_WANTED} properties saved`);
                         }
                     }
                 }
 
-                await Dataset.pushData(cleanItem(normalized));
-                saved += 1;
-                if (saved % 10 === 0) {
-                    log.info(`Progress: ${saved}/${RESULTS_WANTED} properties saved`);
-                }
-            }
+                counters.pages += 1;
 
-            if (!nextPage) {
-                log.info('No further pagination link found, stopping this seed');
+                // Step 4: Find next page URL
+                const nextPageUrl = await pg.evaluate(() => {
+                    const nextLink = document.querySelector('a[rel=\"next\"], a[aria-label*=\"Next\"], a[title*=\"Next\"]');
+                    return nextLink ? nextLink.href : null;
+                });
+
+                if (!nextPageUrl) {
+                    log.info('No next page found, stopping pagination');
+                    break;
+                }
+
+                currentUrl = nextPageUrl;
+                pageNum += 1;
+                await delay(800 + Math.random() * 1200); // Delay between pages
+
+            } catch (error) {
+                log.error(`Error processing page ${currentUrl}: ${error.message}`);
                 break;
             }
-
-            currentUrl = nextPage;
-            page += 1;
-            // Longer delays between pages to appear more human-like
-            await delay(800 + Math.random() * 1200);
         }
 
         if (saved >= RESULTS_WANTED) break;
     }
 
     log.info(
-        `Scraping completed. Saved ${saved} properties. Pages: ${counters.pages}. Sources -> JSON: ${counters.json}, JSON-LD: ${counters.jsonld}, HTML: ${counters.html}. Detail enrichments: ${counters.detailEnhanced}.`,
+        `Scraping completed. Saved ${saved} properties. Pages: ${counters.pages}. URLs extracted: ${counters.urls}. Detail pages fetched: ${counters.detailEnhanced}.`,
     );
 } catch (error) {
     log.exception(error, 'Actor failed');
