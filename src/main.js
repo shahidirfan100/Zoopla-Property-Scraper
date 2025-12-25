@@ -1,14 +1,19 @@
-// Zoopla Property Scraper - Hybrid approach: Playwright for URLs, got-scraping for data
+// Zoopla Property Scraper - Pure HTTP approach with got-scraping
 import { Actor, log } from 'apify';
 import { Dataset } from 'crawlee';
 import { load as cheerioLoad } from 'cheerio';
 import { gotScraping } from 'got-scraping';
-import { launchOptions as camoufoxLaunchOptions } from 'camoufox-js';
-import { firefox } from 'playwright';
+import { HeaderGenerator } from 'header-generator';
 import { randomUUID } from 'node:crypto';
 import { URL } from 'node:url';
 
-// Authentic Firefox user agents for Camoufox
+const headerGenerator = new HeaderGenerator({
+    browsers: [{ name: 'firefox', minVersion: 120 }],
+    devices: ['desktop'],
+    operatingSystems: ['windows'],
+    locales: ['en-GB', 'en-US'],
+});
+
 const FIREFOX_USER_AGENTS = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) Gecko/20100101 Firefox/122.0',
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0',
@@ -787,7 +792,7 @@ const extractDetailFromHtml = (html, url, listingType, searchLocation) => {
         }
 
         // Fallback to HTML parsing
-        const listingId = url.match(/details\/(\\d+)/)?.[1];
+        const listingId = url.match(/details\/(\d+)/)?.[1];
         const title = $('h1').first().text().trim();
         const price = $('[data-testid*="price"], .ui-pricing').first().text().trim();
         const address = $('[data-testid*="address"], .ui-property-summary__address').first().text().trim();
@@ -946,17 +951,28 @@ try {
                     if (saved >= RESULTS_WANTED) break;
 
                     // Check if we've already processed this listing
-                    const listingId = listingUrl.match(/details\/(\\d+)/)?.[1];
-                    if (!listingId || seen.has(listingId)) continue;
+                    const listingId = listingUrl.match(/details\/(\d+)/)?.[1];
+                    if (!listingId) {
+                        log.warning(`No listing ID found in URL: ${listingUrl}`);
+                        continue;
+                    }
+
+                    if (seen.has(listingId)) {
+                        log.debug(`Skipping duplicate listing ID: ${listingId}`);
+                        continue;
+                    }
                     seen.add(listingId);
 
+                    log.debug(`Fetching details for listing ${listingId}: ${listingUrl}`);
                     await delay(300 + Math.random() * 300); // Realistic delay
 
                     const detailHtml = await fetchDetailPageWithGot(listingUrl, session, proxyConf);
                     if (!detailHtml) {
-                        log.warning(`Failed to fetch ${listingUrl}`);
+                        log.warning(`Failed to fetch HTML for ${listingUrl}`);
                         continue;
                     }
+
+                    log.debug(`Fetched ${detailHtml.length} chars HTML, extracting property data...`);
 
                     // Extract property data from detail page HTML
                     const property = extractDetailFromHtml(detailHtml, listingUrl, listingType, location);
@@ -964,10 +980,13 @@ try {
                         await Dataset.pushData(cleanItem(property));
                         saved += 1;
                         counters.detailEnhanced += 1;
+                        log.info(`✓ Saved property ${saved}/${RESULTS_WANTED}: ${property.address || property.title}`);
 
                         if (saved % 10 === 0) {
                             log.info(`Progress: ${saved}/${RESULTS_WANTED} properties saved`);
                         }
+                    } else {
+                        log.warning(`Failed to extract property data from ${listingUrl}`);
                     }
                 }
 
