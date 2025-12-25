@@ -1154,9 +1154,9 @@ try {
                     break;
                 }
 
-                log.info(`Found ${listingUrls.length} listing URLs, fetching details via HTTP...`);
+                log.info(`Found ${listingUrls.length} listing URLs, fetching details via Playwright...`);
 
-                // Step 3: Fetch each listing detail page using got-scraping (fast & cheap)
+                // Step 3: Fetch each listing detail page using Playwright (reliable Cloudflare bypass)
                 for (const listingUrl of listingUrls) {
                     if (saved >= RESULTS_WANTED) break;
 
@@ -1175,29 +1175,33 @@ try {
                     seen.add(listingId);
 
                     log.debug(`Fetching details for listing ${listingId}: ${listingUrl}`);
-                    await delay(300 + Math.random() * 300); // Realistic delay
+                    await delay(500 + Math.random() * 500); // Realistic delay
 
-                    const detailHtml = await fetchDetailPageWithGot(listingUrl, session, proxyConf);
-                    if (!detailHtml) {
-                        log.warning(`Failed to fetch HTML for ${listingUrl}`);
-                        continue;
-                    }
+                    try {
+                        // Navigate to detail page with Playwright
+                        await pg.goto(listingUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+                        await delay(1000); // Wait for dynamic content
 
-                    log.debug(`Fetched ${detailHtml.length} chars HTML, extracting property data...`);
+                        const detailHtml = await pg.content();
+                        log.debug(`Fetched ${detailHtml.length} chars HTML via Playwright`);
 
-                    // Extract property data from detail page HTML
-                    const property = extractDetailFromHtml(detailHtml, listingUrl, listingType, location);
-                    if (property && property.listingId) {
-                        await Dataset.pushData(cleanItem(property));
-                        saved += 1;
-                        counters.detailEnhanced += 1;
-                        log.info(`✓ Saved property ${saved}/${RESULTS_WANTED}: ${property.address || property.title}`);
+                        // Extract property data from detail page HTML
+                        const property = extractDetailFromHtml(detailHtml, listingUrl, listingType, location);
+                        if (property && property.listingId) {
+                            await Dataset.pushData(cleanItem(property));
+                            saved += 1;
+                            counters.detailEnhanced += 1;
+                            log.info(`✓ Saved property ${saved}/${RESULTS_WANTED}: ${property.title || property.address || 'Unknown'}`);
 
-                        if (saved % 10 === 0) {
-                            log.info(`Progress: ${saved}/${RESULTS_WANTED} properties saved`);
+                            if (saved % 10 === 0) {
+                                log.info(`Progress: ${saved}/${RESULTS_WANTED} properties saved`);
+                            }
+                        } else {
+                            log.warning(`Failed to extract property data from ${listingUrl}`);
                         }
-                    } else {
-                        log.warning(`Failed to extract property data from ${listingUrl}`);
+                    } catch (error) {
+                        log.warning(`Failed to fetch detail page ${listingUrl}: ${error.message}`);
+                        continue;
                     }
                 }
 
