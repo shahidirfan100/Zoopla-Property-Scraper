@@ -4,6 +4,7 @@ import { Dataset } from 'crawlee';
 import { load as cheerioLoad } from 'cheerio';
 import { gotScraping } from 'got-scraping';
 import { HeaderGenerator } from 'header-generator';
+import { chromium } from 'playwright';
 import { CookieJar } from 'tough-cookie';
 import { randomUUID } from 'node:crypto';
 import { URL } from 'node:url';
@@ -30,6 +31,7 @@ const JSON_HEADERS = {
 
 const MAX_SEARCH_RETRIES = 4;
 const DETAIL_RETRIES = 2;
+const PLAYWRIGHT_BOOTSTRAP_TIMEOUT = 45000;
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -76,6 +78,75 @@ const rotateSession = (session) => {
     session.headers = fresh.headers;
 };
 
+const toPlaywrightProxy = async (proxyConfiguration) => {
+    if (!proxyConfiguration) return null;
+    const proxyUrl = await proxyConfiguration.newUrl();
+    if (!proxyUrl) return null;
+    try {
+        const parsed = new URL(proxyUrl);
+        const server = `${parsed.protocol}//${parsed.hostname}:${parsed.port}`;
+        return {
+            server,
+            username: decodeURIComponent(parsed.username || ''),
+            password: decodeURIComponent(parsed.password || ''),
+        };
+    } catch (err) {
+        log.warning(`Failed to parse proxy URL for Playwright: ${err.message}`);
+        return null;
+    }
+};
+
+const syncCookiesToJar = (cookies, jar) => {
+    for (const cookie of cookies) {
+        const domain = cookie.domain?.startsWith('.') ? cookie.domain.slice(1) : cookie.domain || 'zoopla.co.uk';
+        const target = `https://${domain}`;
+        const serialized = [
+            `${cookie.name}=${cookie.value}`,
+            `Domain=${cookie.domain || domain}`,
+            `Path=${cookie.path || '/'}`,
+            cookie.expires ? `Expires=${new Date(cookie.expires * 1000).toUTCString()}` : '',
+            cookie.secure ? 'Secure' : '',
+            cookie.httpOnly ? 'HttpOnly' : '',
+        ]
+            .filter(Boolean)
+            .join('; ');
+        try {
+            jar.setCookieSync(serialized, target);
+        } catch (err) {
+            log.debug(`Failed to sync cookie ${cookie.name}: ${err.message}`);
+        }
+    }
+};
+
+const bootstrapWithPlaywright = async (url, session, proxyConfiguration) => {
+    log.info('Running Playwright bootstrap to obtain fresh cookies...');
+    const proxy = await toPlaywrightProxy(proxyConfiguration);
+    const browser = await chromium.launch({
+        headless: true,
+        args: ['--disable-blink-features=AutomationControlled', '--no-sandbox'],
+        proxy: proxy || undefined,
+    });
+
+    try {
+        const context = await browser.newContext({
+            userAgent: session.headers['user-agent'],
+            viewport: { width: 1366, height: 768 },
+        });
+        const page = await context.newPage();
+        await page.goto(url, { waitUntil: 'networkidle', timeout: PLAYWRIGHT_BOOTSTRAP_TIMEOUT });
+        await page.waitForTimeout(4000 + Math.random() * 1500);
+        const cookies = await context.cookies();
+        syncCookiesToJar(cookies, session.cookieJar);
+        const ua = await page.evaluate(() => navigator.userAgent);
+        session.headers['user-agent'] = ua;
+        log.info(`Playwright bootstrap captured ${cookies.length} cookies`);
+    } catch (err) {
+        log.warning(`Playwright bootstrap failed: ${err.message}`);
+    } finally {
+        await browser.close();
+    }
+};
+
 const buildSearchUrl = ({ location, listingType, propertyType, minPrice, maxPrice, radius, page }) => {
     const cleanLoc = String(location || '').trim().toLowerCase().replace(/\s+/g, '-');
     const cleanListing = String(listingType || 'for-sale').trim().toLowerCase();
@@ -117,8 +188,9 @@ const getStartUrls = (input) => {
     return [...new Set(seeds.map((u) => toAbsoluteUrl(u, 'https://www.zoopla.co.uk/')))].filter(Boolean);
 };
 
-const fetchPage = async (url, session, proxyConfiguration, { isJson = false, referer } = {}) => {
+const fetchPage = async (url, session, proxyConfiguration, { isJson = false, referer, bootstrapOn403 = false } = {}) => {
     let lastError;
+    let bootstrapped = false;
     for (let attempt = 1; attempt <= MAX_SEARCH_RETRIES; attempt++) {
         try {
             const proxyUrl = proxyConfiguration ? await proxyConfiguration.newUrl() : undefined;
@@ -142,13 +214,17 @@ const fetchPage = async (url, session, proxyConfiguration, { isJson = false, ref
             if (statusCode === 403 || statusCode === 429) {
                 log.warning(`Request blocked (${statusCode}) on attempt ${attempt}, rotating session and retrying...`);
                 rotateSession(session);
-                await delay(500 * attempt);
+                if (bootstrapOn403 && !bootstrapped) {
+                    bootstrapped = true;
+                    await bootstrapWithPlaywright(url, session, proxyConfiguration);
+                }
+                await delay(600 * attempt);
                 continue;
             }
 
             if (statusCode >= 500) {
                 log.warning(`Server error ${statusCode} on attempt ${attempt} for ${url}`);
-                await delay(400 * attempt);
+                await delay(500 * attempt);
                 continue;
             }
 
@@ -399,6 +475,20 @@ const normalizeListing = (raw, listingType, searchLocation, fallbackUrl) => {
     });
 };
 
+const fetchBoltOn = async (listingId, session, proxyConfiguration, referer) => {
+    if (!listingId) return null;
+    const apiUrl = `https://www.zoopla.co.uk/api/search/bolt-on/${listingId}/`;
+    const response = await fetchPage(apiUrl, session, proxyConfiguration, { isJson: true, referer, bootstrapOn403: true });
+    if (!response) return null;
+    if (response.statusCode !== 200) return null;
+    try {
+        return typeof response.body === 'object' ? response.body : JSON.parse(response.body);
+    } catch (err) {
+        log.debug(`Bolt-on parse failed for ${listingId}: ${err.message}`);
+        return null;
+    }
+};
+
 const extractDetailFromJson = (embedded) => {
     if (!embedded || typeof embedded !== 'object') return null;
     const candidates = [
@@ -466,7 +556,7 @@ const enrichWithDetail = async (url, session, proxyConfiguration, referer) => {
     let lastError;
     for (let attempt = 1; attempt <= DETAIL_RETRIES; attempt++) {
         try {
-            const response = await fetchPage(url, session, proxyConfiguration, { isJson: false, referer });
+            const response = await fetchPage(url, session, proxyConfiguration, { isJson: false, referer, bootstrapOn403: true });
             if (!response) return null;
 
             const html = response.body;
@@ -514,7 +604,7 @@ try {
     const MAX_PAGES = Number.isFinite(+maxPagesRaw) ? Math.max(1, +maxPagesRaw) : 20;
 
     const proxyConf = proxyConfiguration ? await Actor.createProxyConfiguration(proxyConfiguration) : undefined;
-    if (!proxyConf) log.warning('No proxy configuration provided. Zoopla may block datacenter IPs.');
+    if (!proxyConf) log.warning('No proxy configuration provided. Zoopla blocks datacenter IPs; residential proxy is required.');
 
     const session = createSession();
     const startList = getStartUrls({
@@ -527,6 +617,11 @@ try {
         maxPrice,
         radius,
     });
+
+    // Use Playwright once up-front to obtain valid cookies/UA for the first seed
+    if (proxyConf) {
+        await bootstrapWithPlaywright(startList[0], session, proxyConf);
+    }
 
     let saved = 0;
     const seen = new Set();
@@ -563,10 +658,17 @@ try {
 
                 if (includeDetails && normalized.url) {
                     await delay(300 + Math.random() * 400);
-                    const detail = await enrichWithDetail(normalized.url, session, proxyConf, currentUrl);
-                    if (detail) {
-                        mergeDetail(normalized, detail);
+                    // Try bolt-on API first if we have an ID, then detail page
+                    const bolt = await fetchBoltOn(normalized.listingId, session, proxyConf, currentUrl);
+                    if (bolt?.data) {
+                        mergeDetail(normalized, bolt.data);
                         counters.detailEnhanced += 1;
+                    } else {
+                        const detail = await enrichWithDetail(normalized.url, session, proxyConf, currentUrl);
+                        if (detail) {
+                            mergeDetail(normalized, detail);
+                            counters.detailEnhanced += 1;
+                        }
                     }
                 }
 

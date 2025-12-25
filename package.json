@@ -9,6 +9,7 @@
     "cheerio": "^1.0.0-rc.12",
     "got-scraping": "^4.1.2",
     "header-generator": "^2.1.27",
+    "playwright": "^1.56.1",
     "tough-cookie": "^4.1.4"
   },
   "scripts": {
