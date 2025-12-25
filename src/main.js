@@ -926,7 +926,36 @@ const extractDetailFromHtml = (html, url, listingType, searchLocation) => {
     try {
         const $ = cheerioLoad(html);
 
-        // Try to extract __NEXT_DATA__
+        // Priority 1: Extract from __ZAD_TARGETING__ (most reliable for new-homes)
+        const zadScript = $('#__ZAD_TARGETING__').text();
+        if (zadScript) {
+            try {
+                const zad = JSON.parse(zadScript);
+                if (zad.listing_id) {
+                    log.info(`Extracted detail from __ZAD_TARGETING__ for ${url}`);
+                    return cleanItem({
+                        listingId: String(zad.listing_id),
+                        title: zad.display_address || $('h1').first().text().split('\n')[0].trim(),
+                        address: zad.display_address || zad.area_name,
+                        price: zad.price ? `£${Number(zad.price).toLocaleString()}` : null,
+                        priceNumeric: zad.price,
+                        propertyType: zad.property_type,
+                        bedrooms: zad.num_beds || zad.beds_max,
+                        bathrooms: zad.num_baths,
+                        isSharedOwnership: zad.is_shared_ownership === 'true',
+                        isNewBuild: zad.is_new_home === 'true',
+                        agent: zad.branch_name,
+                        url,
+                        category: listingType,
+                        location: searchLocation,
+                    });
+                }
+            } catch (e) {
+                log.debug(`Failed to parse __ZAD_TARGETING__: ${e.message}`);
+            }
+        }
+
+        // Priority 2: Try to extract __NEXT_DATA__
         const embedded = extractEmbeddedJson(html);
         if (embedded) {
             const detailJson = extractDetailFromJson(embedded);
@@ -936,14 +965,14 @@ const extractDetailFromHtml = (html, url, listingType, searchLocation) => {
             }
         }
 
-        // Try JSON-LD
+        // Priority 3: Try JSON-LD
         const detailLd = extractDetailFromJsonLd($, url);
         if (detailLd) {
             log.debug(`Extracted detail from JSON-LD for ${url}`);
             return normalizeListing(detailLd, listingType, searchLocation, url);
         }
 
-        // Fallback to HTML parsing
+        // Priority 4: Fallback to HTML parsing
         // Handle various URL patterns: /details/123/, /details/contact/123/, /new-homes/details/123/
         const listingId = url.match(/\/(\d{6,})(?:\/|\?|$)/)?.[1];
 
