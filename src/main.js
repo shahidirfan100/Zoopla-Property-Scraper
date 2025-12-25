@@ -852,11 +852,29 @@ const extractDetailFromHtml = (html, url, listingType, searchLocation) => {
         }
 
         // Fallback to HTML parsing
-        const listingId = url.match(/details\/(\d+)/)?.[1];
-        const title = $('h1').first().text().trim();
-        const price = $('[data-testid*="price"], .ui-pricing').first().text().trim();
-        const address = $('[data-testid*="address"], .ui-property-summary__address').first().text().trim();
-        const description = $('[data-testid="description"], .dp-description__text').first().text().trim();
+        // Handle various URL patterns: /details/123/, /details/contact/123/, /new-homes/details/123/
+        const listingId = url.match(/\/(\d{6,})(?:\/|\?|$)/)?.[1];
+
+        // Try multiple selectors for title
+        const title = $('h1').first().text().trim() ||
+            $('[data-testid="listing-title"]').first().text().trim() ||
+            $('[data-testid="address-line-1"]').first().text().trim();
+
+        // Try multiple selectors for price
+        const price = $('[data-testid="price"]').first().text().trim() ||
+            $('[data-testid*="price"]').first().text().trim() ||
+            $('.ui-pricing').first().text().trim() ||
+            $('p:contains("£")').first().text().trim();
+
+        // Try multiple selectors for address
+        const address = $('[data-testid="address-line-1"]').first().text().trim() ||
+            $('[data-testid*="address"]').first().text().trim() ||
+            $('.ui-property-summary__address').first().text().trim() ||
+            $('address').first().text().trim();
+
+        const description = $('[data-testid="truncated-description-text"]').first().text().trim() ||
+            $('[data-testid="description"]').first().text().trim() ||
+            $('.dp-description__text').first().text().trim();
 
         // Extract bedrooms, bathrooms
         const bedroomsText = $('[data-testid*="bed"], .c-PJLV').text();
@@ -875,8 +893,12 @@ const extractDetailFromHtml = (html, url, listingType, searchLocation) => {
 
         if (!listingId && !title && !price) {
             log.warning(`Could not extract minimal data from ${url}`);
+            // Log HTML snippet for debugging
+            log.debug(`HTML preview: ${html.substring(0, 500)}`);
             return null;
         }
+
+        log.debug(`HTML extraction - ID: ${listingId}, Title: ${title?.substring(0, 50)}, Price: ${price}`);
 
         log.debug(`Extracted detail from HTML parsing for ${url}`);
         return cleanItem({
@@ -1011,9 +1033,10 @@ try {
                     if (saved >= RESULTS_WANTED) break;
 
                     // Check if we've already processed this listing
-                    const listingId = listingUrl.match(/details\/(\d+)/)?.[1];
+                    // Handle various URL patterns: /details/123/, /details/contact/123/, /new-homes/details/123/
+                    const listingId = listingUrl.match(/\/(\d{6,})(?:\/|\?|$)/)?.[1];
                     if (!listingId) {
-                        log.warning(`No listing ID found in URL: ${listingUrl}`);
+                        log.debug(`Skipping URL without listing ID: ${listingUrl}`);
                         continue;
                     }
 
