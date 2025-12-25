@@ -698,23 +698,33 @@ const normalizeListing = (raw, listingType, searchLocation, fallbackUrl) => {
         fallbackUrl ||
         null;
 
+    // Handle various URL patterns for listing ID extraction
     const listingId =
         raw.listingId ||
         raw.listing_id ||
         raw.id ||
-        (typeof url === 'string' ? url.match(/details\/(\d+)/)?.[1] : null) ||
+        (typeof url === 'string' ? url.match(/\/(\d{6,})(?:\/|\?|$)/)?.[1] : null) ||
         raw.propertyId ||
         raw.slug ||
         null;
 
-    const address = raw.displayAddress || raw.address || raw.location || raw.streetAddress || raw.name || null;
+    // Extract address from various possible fields
+    const address = raw.displayAddress || raw.address || raw.location || raw.streetAddress ||
+        (raw.name && !raw.name.includes('bed') ? raw.name : null) || null;
+
+    // Handle price - support both formatted and numeric
     const price =
         raw.price ||
         raw.priceText ||
         raw.formattedPrice ||
         raw.displayPrice ||
         raw.amount ||
-        (raw.offers && (raw.offers.price || raw.offers.priceCurrency)) ||
+        (raw.offers?.price ? `£${Number(raw.offers.price).toLocaleString()}` : null) ||
+        null;
+
+    // Store numeric price for sorting/filtering
+    const priceNumeric = raw.priceNumeric || raw.offers?.price ||
+        (typeof price === 'string' ? parseInt(price.replace(/[^0-9]/g, '')) : null) ||
         null;
 
     const images = [];
@@ -735,10 +745,12 @@ const normalizeListing = (raw, listingType, searchLocation, fallbackUrl) => {
         title: raw.title || raw.name || address || null,
         address,
         price,
+        priceNumeric,
         propertyType: raw.propertyType || raw.property_type || raw.type || null,
         bedrooms: raw.numBedrooms || raw.bedrooms || raw.numberOfBedrooms || null,
         bathrooms: raw.numBathrooms || raw.bathrooms || raw.numberOfBathrooms || null,
         receptions: raw.numReceptions || raw.receptions || null,
+        floorSize: raw.floorSize || raw.floorArea || null,
         description: raw.summaryDescription || raw.description || raw.detailedDescription || null,
         agent: raw.branch?.name || raw.agentName || raw.seller?.name || null,
         agentPhone: raw.branch?.telephone || raw.phoneNumber || raw.telephone || null,
@@ -789,7 +801,46 @@ const extractDetailFromJsonLd = ($, url) => {
             const raw = $(el).contents().text();
             const parsed = JSON.parse(raw);
             const payloads = Array.isArray(parsed) ? parsed : [parsed];
+
             for (const payload of payloads) {
+                // Prioritize RealEstateListing schema (Zoopla's primary schema)
+                if (payload?.['@type'] === 'RealEstateListing') {
+                    log.info('Found RealEstateListing JSON-LD schema');
+
+                    // Extract bedrooms, bathrooms from additionalProperty array
+                    let bedrooms = null;
+                    let bathrooms = null;
+                    let floorSize = null;
+
+                    if (Array.isArray(payload.additionalProperty)) {
+                        for (const prop of payload.additionalProperty) {
+                            if (prop.name === 'Bedrooms') bedrooms = parseInt(prop.value) || null;
+                            if (prop.name === 'Bathrooms') bathrooms = parseInt(prop.value) || null;
+                            if (prop.name === 'Floor size') floorSize = prop.value;
+                        }
+                    }
+
+                    // Extract price from offers object
+                    const price = payload.offers?.price || null;
+                    const priceCurrency = payload.offers?.priceCurrency || 'GBP';
+
+                    detail = {
+                        title: payload.name,
+                        description: payload.description,
+                        price: price ? `£${Number(price).toLocaleString()}` : null,
+                        priceNumeric: price,
+                        priceCurrency,
+                        bedrooms,
+                        bathrooms,
+                        floorSize,
+                        images: payload.image ? [payload.image] : null,
+                        url: toAbsoluteUrl(payload.url || payload['@id'], url),
+                        '@type': 'RealEstateListing',
+                    };
+                    return;
+                }
+
+                // Fallback for other schema types
                 if (
                     payload?.['@type'] &&
                     payload['@type'] !== 'BreadcrumbList' &&
