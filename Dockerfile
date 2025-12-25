@@ -1,16 +1,12 @@
-FROM alpine:latest
+FROM apify/actor-node:22
 
-RUN apk add --no-cache nodejs npm
+WORKDIR /home/myuser
 
-RUN addgroup app && adduser app -G app -D
-WORKDIR /home/app
-USER app
+COPY package*.json ./
+RUN npm ci --omit=dev
 
-COPY --chown=app:app package*.json ./
-RUN npm i --omit=dev && rm -r ~/.npm || true
-
-COPY --chown=app:app . ./
+COPY . ./
 
 ENV APIFY_LOG_LEVEL=INFO
 
-CMD npm start --silent
+CMD ["npm", "start"]
