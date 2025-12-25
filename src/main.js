@@ -181,19 +181,60 @@ const warmupSession = async (session, proxyConfiguration) => {
 
 const extractListingUrlsFromPage = async (page) => {
     try {
-        await page.waitForSelector('a[href*="/for-sale/details/"], a[href*="/to-rent/details/"], a[href*="/details/"]', { timeout: 10000 });
+        // Wait for page to fully load with multiple selector strategies
+        log.info('Waiting for listing elements to appear...');
+
+        // Try multiple selectors - Zoopla uses different structures
+        const selectors = [
+            '[data-testid="search-result"]',
+            '[data-testid="listing-card"]',
+            'a[href*="/details/"]',
+            'article a[href*="/for-sale/"]',
+            '.css-wfndrn', // Common listing container class
+        ];
+
+        let foundSelector = null;
+        for (const selector of selectors) {
+            try {
+                await page.waitForSelector(selector, { timeout: 5000 });
+                foundSelector = selector;
+                log.info(`Found listings using selector: ${selector}`);
+                break;
+            } catch {
+                // Try next selector
+            }
+        }
+
+        if (!foundSelector) {
+            // Last resort: wait for any links and extract
+            log.warning('No listing selector found, waiting for page to stabilize...');
+            await delay(5000);
+        }
+
+        // Extract all URLs that look like property listings
         const urls = await page.evaluate(() => {
-            const links = Array.from(document.querySelectorAll('a[href*="/for-sale/details/"], a[href*="/to-rent/details/"], a[href*="/details/"]'));
             const uniqueUrls = new Set();
-            links.forEach(link => {
+
+            // Get all links on the page
+            const allLinks = Array.from(document.querySelectorAll('a[href]'));
+
+            for (const link of allLinks) {
                 const href = link.getAttribute('href');
-                if (href && href.includes('/details/')) {
+                if (!href) continue;
+
+                // Match various listing URL patterns
+                if (href.includes('/details/') && href.match(/\/\d{6,}/)) {
                     const absolute = href.startsWith('http') ? href : `https://www.zoopla.co.uk${href}`;
-                    uniqueUrls.add(absolute);
+                    // Skip contact pages
+                    if (!absolute.includes('/contact/')) {
+                        uniqueUrls.add(absolute);
+                    }
                 }
-            });
+            }
+
             return Array.from(uniqueUrls);
         });
+
         log.info(`Extracted ${urls.length} listing URLs from Playwright page`);
         return urls;
     } catch (error) {
@@ -1055,20 +1096,27 @@ try {
             const pg = await ensurePage(session, proxyConf);
 
             try {
-                await pg.goto(currentUrl, { waitUntil: 'networkidle', timeout: 45000 });
+                await pg.goto(currentUrl, { waitUntil: 'networkidle', timeout: 60000 });
 
-                // Check for Cloudflare challenge
+                // Check for Cloudflare challenge and wait longer for it to resolve
                 const pageContent = await pg.content();
                 const isCloudflareChallenge = pageContent.includes('cf-browser-verification') ||
-                    pageContent.includes('Just a moment');
+                    pageContent.includes('Just a moment') ||
+                    pageContent.includes('Checking your browser');
 
                 if (isCloudflareChallenge) {
-                    log.info('Cloudflare challenge detected, waiting...');
-                    await pg.waitForLoadState('networkidle', { timeout: 15000 });
-                    await delay(2000);
+                    log.info('Cloudflare challenge detected, waiting for resolution...');
+                    await pg.waitForLoadState('networkidle', { timeout: 30000 });
+                    await delay(8000); // Wait longer for Cloudflare to fully resolve
                 }
 
-                //Step 2: Extract listing URLs from the page
+                // Scroll down to trigger lazy loading of listings
+                await pg.evaluate(() => window.scrollTo(0, 500));
+                await delay(1000);
+                await pg.evaluate(() => window.scrollTo(0, 1000));
+                await delay(1000);
+
+                // Step 2: Extract listing URLs from the page
                 const listingUrls = await extractListingUrlsFromPage(pg);
                 counters.urls += listingUrls.length;
 
