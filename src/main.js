@@ -2,10 +2,8 @@
 import { Actor, log } from 'apify';
 import { Dataset } from 'crawlee';
 import { load as cheerioLoad } from 'cheerio';
-import { gotScraping } from 'got-scraping';
 import { HeaderGenerator } from 'header-generator';
 import { chromium } from 'playwright';
-import { CookieJar } from 'tough-cookie';
 import { randomUUID } from 'node:crypto';
 import { URL } from 'node:url';
 
@@ -31,7 +29,6 @@ const JSON_HEADERS = {
 
 const MAX_SEARCH_RETRIES = 4;
 const DETAIL_RETRIES = 2;
-const PLAYWRIGHT_BOOTSTRAP_TIMEOUT = 45000;
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -61,7 +58,6 @@ const createSession = () => {
     const seed = randomUUID();
     return {
         id: seed,
-        cookieJar: new CookieJar(),
         headers: headerGenerator.getHeaders({
             sessionToken: seed,
             locales: ['en-GB', 'en-US'],
@@ -74,7 +70,6 @@ const createSession = () => {
 const rotateSession = (session) => {
     const fresh = createSession();
     session.id = fresh.id;
-    session.cookieJar = fresh.cookieJar;
     session.headers = fresh.headers;
 };
 
@@ -93,57 +88,6 @@ const toPlaywrightProxy = async (proxyConfiguration) => {
     } catch (err) {
         log.warning(`Failed to parse proxy URL for Playwright: ${err.message}`);
         return null;
-    }
-};
-
-const syncCookiesToJar = (cookies, jar) => {
-    for (const cookie of cookies) {
-        const domain = cookie.domain?.startsWith('.') ? cookie.domain.slice(1) : cookie.domain || 'zoopla.co.uk';
-        const target = `https://${domain}`;
-        const serialized = [
-            `${cookie.name}=${cookie.value}`,
-            `Domain=${cookie.domain || domain}`,
-            `Path=${cookie.path || '/'}`,
-            cookie.expires ? `Expires=${new Date(cookie.expires * 1000).toUTCString()}` : '',
-            cookie.secure ? 'Secure' : '',
-            cookie.httpOnly ? 'HttpOnly' : '',
-        ]
-            .filter(Boolean)
-            .join('; ');
-        try {
-            jar.setCookieSync(serialized, target);
-        } catch (err) {
-            log.debug(`Failed to sync cookie ${cookie.name}: ${err.message}`);
-        }
-    }
-};
-
-const bootstrapWithPlaywright = async (url, session, proxyConfiguration) => {
-    log.info('Running Playwright bootstrap to obtain fresh cookies...');
-    const proxy = await toPlaywrightProxy(proxyConfiguration);
-    const browser = await chromium.launch({
-        headless: true,
-        args: ['--disable-blink-features=AutomationControlled', '--no-sandbox'],
-        proxy: proxy || undefined,
-    });
-
-    try {
-        const context = await browser.newContext({
-            userAgent: session.headers['user-agent'],
-            viewport: { width: 1366, height: 768 },
-        });
-        const page = await context.newPage();
-        await page.goto(url, { waitUntil: 'networkidle', timeout: PLAYWRIGHT_BOOTSTRAP_TIMEOUT });
-        await page.waitForTimeout(4000 + Math.random() * 1500);
-        const cookies = await context.cookies();
-        syncCookiesToJar(cookies, session.cookieJar);
-        const ua = await page.evaluate(() => navigator.userAgent);
-        session.headers['user-agent'] = ua;
-        log.info(`Playwright bootstrap captured ${cookies.length} cookies`);
-    } catch (err) {
-        log.warning(`Playwright bootstrap failed: ${err.message}`);
-    } finally {
-        await browser.close();
     }
 };
 
@@ -188,51 +132,98 @@ const getStartUrls = (input) => {
     return [...new Set(seeds.map((u) => toAbsoluteUrl(u, 'https://www.zoopla.co.uk/')))].filter(Boolean);
 };
 
-const fetchPage = async (url, session, proxyConfiguration, { isJson = false, referer, bootstrapOn403 = false } = {}) => {
+let browser;
+let context;
+let page;
+
+const closeContext = async () => {
+    try {
+        if (context) await context.close();
+    } catch {}
+    try {
+        if (browser) await browser.close();
+    } catch {}
+    browser = undefined;
+    context = undefined;
+    page = undefined;
+};
+
+const ensurePage = async (session, proxyConfiguration) => {
+    if (page && !page.isClosed()) return page;
+    await closeContext();
+    const proxy = await toPlaywrightProxy(proxyConfiguration);
+    browser = await chromium.launch({
+        headless: true,
+        args: ['--disable-blink-features=AutomationControlled', '--no-sandbox'],
+        proxy: proxy || undefined,
+    });
+    context = await browser.newContext({
+        userAgent: session.headers['user-agent'],
+        viewport: { width: 1366, height: 768 },
+        extraHTTPHeaders: {
+            ...HTML_HEADERS,
+            ...session.headers,
+        },
+    });
+    page = await context.newPage();
+    return page;
+};
+
+const fetchPage = async (url, session, proxyConfiguration, { isJson = false, referer } = {}) => {
     let lastError;
-    let bootstrapped = false;
     for (let attempt = 1; attempt <= MAX_SEARCH_RETRIES; attempt++) {
         try {
-            const proxyUrl = proxyConfiguration ? await proxyConfiguration.newUrl() : undefined;
-            const response = await gotScraping({
-                url,
-                method: 'GET',
-                headers: {
-                    ...(isJson ? JSON_HEADERS : HTML_HEADERS),
-                    ...session.headers,
-                    ...(referer ? { referer } : {}),
-                },
-                cookieJar: session.cookieJar,
-                proxyUrl,
-                throwHttpErrors: false,
-                followRedirect: true,
-                timeout: { request: 30000 },
-                http2: true,
-            });
+            const pg = await ensurePage(session, proxyConfiguration);
+            const headers = {
+                ...(isJson ? JSON_HEADERS : HTML_HEADERS),
+                ...session.headers,
+                ...(referer ? { referer } : {}),
+            };
 
-            const { statusCode } = response;
+            if (isJson) {
+                const response = await context.request.get(url, {
+                    headers,
+                    timeout: 25000,
+                });
+                const statusCode = response.status();
+                if (statusCode === 403 || statusCode === 429) {
+                    log.warning(`Request blocked (${statusCode}) on attempt ${attempt}, rotating session and retrying...`);
+                    rotateSession(session);
+                    await closeContext();
+                    await delay(600 * attempt);
+                    continue;
+                }
+                if (statusCode >= 500) {
+                    log.warning(`Server error ${statusCode} on attempt ${attempt} for ${url}`);
+                    await delay(500 * attempt);
+                    continue;
+                }
+                const body = await response.text();
+                return { statusCode, body };
+            }
+
+            await context.setExtraHTTPHeaders(headers);
+            const response = await pg.goto(url, { waitUntil: 'domcontentloaded', timeout: 25000 });
+            const statusCode = response?.status() ?? 0;
             if (statusCode === 403 || statusCode === 429) {
                 log.warning(`Request blocked (${statusCode}) on attempt ${attempt}, rotating session and retrying...`);
                 rotateSession(session);
-                if (bootstrapOn403 && !bootstrapped) {
-                    bootstrapped = true;
-                    await bootstrapWithPlaywright(url, session, proxyConfiguration);
-                }
+                await closeContext();
                 await delay(600 * attempt);
                 continue;
             }
-
             if (statusCode >= 500) {
                 log.warning(`Server error ${statusCode} on attempt ${attempt} for ${url}`);
                 await delay(500 * attempt);
                 continue;
             }
-
-            return response;
+            const body = response ? await response.text() : await pg.content();
+            return { statusCode, body };
         } catch (error) {
             lastError = error;
             log.warning(`Fetch attempt ${attempt} failed for ${url}: ${error.message}`);
-            await delay(400 * attempt);
+            await closeContext();
+            await delay(500 * attempt);
         }
     }
     log.error(`Failed to fetch ${url} after ${MAX_SEARCH_RETRIES} attempts: ${lastError?.message || 'Unknown error'}`);
@@ -478,7 +469,7 @@ const normalizeListing = (raw, listingType, searchLocation, fallbackUrl) => {
 const fetchBoltOn = async (listingId, session, proxyConfiguration, referer) => {
     if (!listingId) return null;
     const apiUrl = `https://www.zoopla.co.uk/api/search/bolt-on/${listingId}/`;
-    const response = await fetchPage(apiUrl, session, proxyConfiguration, { isJson: true, referer, bootstrapOn403: true });
+    const response = await fetchPage(apiUrl, session, proxyConfiguration, { isJson: true, referer });
     if (!response) return null;
     if (response.statusCode !== 200) return null;
     try {
@@ -556,7 +547,7 @@ const enrichWithDetail = async (url, session, proxyConfiguration, referer) => {
     let lastError;
     for (let attempt = 1; attempt <= DETAIL_RETRIES; attempt++) {
         try {
-            const response = await fetchPage(url, session, proxyConfiguration, { isJson: false, referer, bootstrapOn403: true });
+            const response = await fetchPage(url, session, proxyConfiguration, { isJson: false, referer });
             if (!response) return null;
 
             const html = response.body;
@@ -617,11 +608,6 @@ try {
         maxPrice,
         radius,
     });
-
-    // Use Playwright once up-front to obtain valid cookies/UA for the first seed
-    if (proxyConf) {
-        await bootstrapWithPlaywright(startList[0], session, proxyConf);
-    }
 
     let saved = 0;
     const seen = new Set();
