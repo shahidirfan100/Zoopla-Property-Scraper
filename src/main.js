@@ -505,21 +505,52 @@ const findNextFromHtml = ($, currentUrl) => {
 };
 
 const extractSearchPayload = (html, currentUrl) => {
+    log.info(`Extracting data from HTML (length: ${html.length} chars)`);
+
     const $ = cheerioLoad(html);
     const embedded = extractEmbeddedJson(html);
+
+    if (embedded) {
+        log.info('Found embedded JSON (__NEXT_DATA__ or window state)');
+        log.debug(`Embedded JSON keys: ${Object.keys(embedded).join(', ')}`);
+    } else {
+        log.warning('No embedded JSON found in HTML');
+        // Log first 500 chars to see what we got
+        log.debug(`HTML preview: ${html.substring(0, 500)}`);
+    }
+
     const listingsFromJson = embedded ? findListingArray(embedded) : null;
     const nextFromJson = embedded ? findNextFromJson(embedded, currentUrl) : null;
 
     if (listingsFromJson?.length) {
+        log.info(`Found ${listingsFromJson.length} listings from embedded JSON`);
         return { listings: listingsFromJson, nextPage: nextFromJson || findNextFromHtml($, currentUrl), source: 'json' };
     }
 
     const jsonLdListings = extractJsonLdListings($, currentUrl);
     if (jsonLdListings.length) {
+        log.info(`Found ${jsonLdListings.length} listings from JSON-LD`);
         return { listings: jsonLdListings, nextPage: nextFromJson || findNextFromHtml($, currentUrl), source: 'jsonld' };
     }
 
     const htmlListings = extractHtmlListings($, currentUrl);
+    log.info(`Found ${htmlListings.length} listings from HTML parsing`);
+
+    if (htmlListings.length === 0) {
+        log.warning('No listings found by any extraction method!');
+        // Check if page has search results container
+        const hasSearchResults = $('[data-testid="search-result"]').length > 0 ||
+            $('.listing-results-wrapper').length > 0 ||
+            $('article').length > 0;
+        log.info(`Page has search results container: ${hasSearchResults}`);
+
+        // Log what scripts are on the page
+        const scriptCount = $('script').length;
+        const nextDataScript = $('script#__NEXT_DATA__').length;
+        const jsonLdScripts = $('script[type="application/ld+json"]').length;
+        log.info(`Scripts found: ${scriptCount} total, __NEXT_DATA__: ${nextDataScript}, JSON-LD: ${jsonLdScripts}`);
+    }
+
     return { listings: htmlListings, nextPage: findNextFromHtml($, currentUrl), source: 'html' };
 };
 
